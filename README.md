@@ -3,11 +3,9 @@
 ## Overview
 Many teams want to backup large datasets directly to S3 Glacier or Glacier Deep Archive for a low-cost DR strategy. The first consideration for doing this is to use `aws s3 sync` or `rclone` to do this. While this approach *could* work, it's important to understand the drawbacks. 
 
-Specifically, ***the cost of PUT operations***. If your dataset contains many files, a simple copy could be ***very, very*** expensive. 
+Specifically, ***the cost of PUT operations and metadata overhead***.  The cost of PUT operations - in other words, writes - to Glacier is more expensive than S3 standard. Each object written to Glacier also has an overhead of ~32KB in Glacier **AND** 8KB of metadata **stored in S3**. This means that if you have many small files the cost could actually be **more expensive** to write them to Glacier than keeping them in S3. 
 
-Another issue is that each object written to Glacier has an overhead of ~32KB in Glacier **AND** 8KB of metaata **stored in S3**. This means that if you have many small files, the cost could actually be **more expensive** to write them to Glacier than keeping them in S3. 
-
-To give an overly simplistic and dramatic scenario, let's say you have 10,000,000 1KB files. That's ~ 10GB of files total. To write this raw to Glacier, it woudl cost:
+To give an overly simplistic and dramatic scenario, let's say you have 10,000,000 1KB files. That's ~ 10GB of files total. To write this raw to Glacier, it would cost:
 
 `10,000,000 PUT operations / ($0.05/1,000 PUT operations) = $500`
 
@@ -15,15 +13,15 @@ To give an overly simplistic and dramatic scenario, let's say you have 10,000,00
 
 `(10,000,000 * 1KB + 10,000,000 * 32 KB)/(1024*1024) = 33 GB * $0.004 per GB-Month for Glacier (non-DA)  = $0.16 per GB-month`
 
-Even though the total size was only 10Gb, it cost $500 for the initial upload plus $0.344 per month. For comparison, cost to upload the same files to S3 would be a tenth of that and the monthly cost would be roughly $0.23. The problem is amplified if there is a high change rate with more frequent backups/syncs.
+Even though the total size was only 10Gb, it cost **$500** for the initial upload plus $0.344 per month. For comparison, cost to upload the same files to S3 would be a tenth of that and the monthly cost would be roughly $0.23. The problem is amplified if there is a high change rate with more frequent backups/syncs.
 
-In order to reap the benefits of using S3 Glacier of a low-cost backup target, backups need to be sent in a way that optimizes the number of PUT operations and file sizes. Many commercial backup/archival software products address this, but what if you're looking for an open and free alternative? This is where Duplicity comes in.
+To reap the benefits of using S3 Glacier as a low-cost backup target, backups need to be sent in a way that optimizes the number of PUT operations and file sizes. Many commercial backup/archival software products address this, but what if you're looking for an open and free alternative? This is where Duplicity comes in.
 
-Duplicity is an open source command line backup utility that uses `librsync` to perform full+incremental backups of files, written to a variety of targets including S3 and S3 Glacier. Further, it optimizes backups by combining files into tar archives with (optional) compression and encryption. Using Duplicity, we can create full backups and send them directly to glacier as consolidated tar files in S3 and S3 Glacier, then capture incremental backups of changes. 
+Duplicity is an open source command line backup utility that uses `librsync` to perform full+incremental backups of files and  write them to a variety of targets, including S3 and S3 Glacier. It optimizes backups by combining files into tar archives with (optional) compression and encryption. It also creates compact incremtenals by using file diffs rather than copying the entire contents of changed files. Using Duplicity, we can periodically create full backups and send them directly to glacier as consolidated tar files in S3 and S3 Glacier, then capture incremental backups of changes. 
 
-Revising the 10,000,000 1KB file example above, with Duplicity a full backup with a conservative 20% compression ratio and volume size of 1GB could result in as little as 8 1GB objects written to Glacier, costing just $0.0004 for PUT operations and $0.032 per month.
+Revisiting the 10,000,000 1KB file example above, with Duplicity a full backup with a conservative 20% compression ratio and volume size of 1GB could result in as little as 8 1GB objects written to Glacier, costing just $0.0004 for PUT operations and $0.032 per month. 
 
-The guide below descibes how to setup and use a containerized version of Duplicity. It leverages the  [Tecnativa repo](https://github.com/Tecnativa/docker-duplicity) on Github, which contains a Dockerfile that builds a Duplicity container along with helper utilities to simplify its use. Using the sample commands or docker-compose below, you can stand up a Duplicity backup strategy to efficiently backup files to Glacier or Glacier Deep Archive on a regular basis. 
+The guide below descibes how to setup and use a containerized version of Duplicity. It uses the a Docker image sourced from the  [Tecnativa repository](https://github.com/Tecnativa/docker-duplicity) on Github. This repo contains a Dockerfile that builds a Duplicity container along with helper utilities to simplify commond tasks and scenarios. Using either the commands or docker-compose below, you can quickly setup a Duplicity backup strategy to efficiently backup files directly to Glacier or Glacier Deep Archive on a regular basis. 
 
 ## Execution Options
 The container provided in the [Tecnativa repo](https://github.com/Tecnativa/docker-duplicity) could be used in two ways:
@@ -39,9 +37,11 @@ First you'll need to clone the repo and build the docker image:
 git clone https://github.com/Tecnativa/docker-duplicity.git
 docker build --target latest -t docker-duplicity:latest ./docker-duplicity
 ```
-**Note:** The repo is available on Docker Hub as well, but we suggest you clone the git repo and build/push the image into your own repo.
+**Note:** The repo is available on Docker Hub as well, but it is a good practice to clone the repo and build/push the image into your own container image repo.
 
-With the image built and tagged, we can run individual commands. Below are examples:
+With the image built and tagged, we can run individual commands. Below are examples. 
+
+**Note: ** The commands below assume S3 credentials are available to the container. If not, they can be passed in environment variables as `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`. Always store these credentials in a secure location and make sure the IAM principal they are tied to has least privilege access!
 
 ### Run a backup:
 ```bash
@@ -58,20 +58,20 @@ boto3+s3://bucketname/backup-folder
 Breaking this down:
 | | |
 | --- | ------------ |
-| `docker run -it --rm --hostname 'backupname' \` | Run the container using hostname 'backupname'. This shoudl be a unique name that you use to describe the backup. It will be used in the name of the manifest file |
-| `-e OPTIONS="--full-if-older-than 4W --s3-use-deep-archive --no-encryption --progress --archive-dir /mnt/backup/src/config --s3-use-multiprocessing --volsize 1024 --verbosity i --log-file /logfiles/log-$(date "+%Y%m%d-%H%M%S").log" \` | [Duplicity configuration options](http://duplicity.nongnu.org/vers8/duplicity.1.html#sect5) that will be used. <br /> The options in this example indicate to: <br /> <ul><li>Generate a full backup if the last full backup was more than 4 weeks ago, otherwise incremental</li><li>Upload to S3 Deep Archive</li><li>No encryption</li><li>Show progress</li><li>Store the archive manifest files (backup config) in a separate location</li><li>Use S3 multiprocessing</li><li>Combine (i.e. glob) files into achives up to 1024 MB - Important to reduce the number of PUT operations to Glacier</li><li>Log INFO</li><li>Log to file</li></ul> <br /> Feel free to customize these as needed.| 
-| `-e OPTIONS_EXTRA="--asynchronous-upload --s3-european-buckets --s3-multipart-chunk-size 10 --s3-use-new-style --metadata-sync-mode partial --file-prefix-archive archive-$(hostname -f)- --file-prefix-manifest manifest-$(hostname -f)- --file-prefix-signature signature-$(hostname -f)-" \` | These are additional Duplicity configuration options that are used. In general, these don't need to be changed and are separated for convenience. |
-| `-v /tmp/testfiles:/mnt/backup/src/data:ro \` | Mounts `/tmp/testfiles` from the host and uses it as the backup source |
-| `-v "$PWD/config:/mnt/backup/src/config" \` | Mounts `./config` from to host as a volume in the container. This is where the duplicity manifest snd sig files are stored to track backup sets/chains. <br /> *Note:* Though these files are backed up to S3/Glacier, they should be stored persistently locally and used. Otherwise, you will need to restore the .sig file from Glacier in order to perform incrementals. |
-| `-v "$PWD/logs:/logfiles" \` | Mounts `./logs` so that Duplicity can write its log files there and persist them. |
-| `docker-duplicity:latest dup \` | The container and the command to execute (`dup`) |
+| `docker run -it --rm --hostname 'backupname' \` | Run the container using hostname 'backupname'. This should be a unique name that you use to describe the backup. It will be used in the name of the manifest file and in subsequent commands to lookup the backup metadata |
+| `-e OPTIONS="--full-if-older-than 4W --s3-use-deep-archive --no-encryption --progress --archive-dir /mnt/backup/src/config --s3-use-multiprocessing --volsize 1024 --verbosity i --log-file /logfiles/log-$(date "+%Y%m%d-%H%M%S").log" \` | [Duplicity configuration options](http://duplicity.nongnu.org/vers8/duplicity.1.html#sect5) that will be used. <br /> The options in this example indicate to: <br /> <ul><li>Generate a full backup if the last full backup was more than 4 weeks ago, otherwise incremental</li><li>Upload to S3 Deep Archive</li><li>No encryption</li><li>Show progress</li><li>Store the archive manifest files (backup config) in a separate location</li><li>Use S3 multiprocessing</li><li>Combine (i.e. glob) files into achives up to 1024 MB - Important to reduce the number of PUT operations to Glacier</li><li>Log level INFO</li><li>Log to file</li></ul> <br /> These can be adjusted as needed.| 
+| `-e OPTIONS_EXTRA="--asynchronous-upload --s3-european-buckets --s3-multipart-chunk-size 10 --s3-use-new-style --metadata-sync-mode partial --file-prefix-archive archive-$(hostname -f)- --file-prefix-manifest manifest-$(hostname -f)- --file-prefix-signature signature-$(hostname -f)-" \` | These are additional Duplicity options that are applied to the command. In general, these don't need to be changed and are separated for convenience. |
+| `-v /tmp/testfiles:/mnt/backup/src/data:ro \` | Mounts `/tmp/testfiles` from the host and uses it as the backup source. Change this to the path of your backup source. |
+| `-v "$PWD/config:/mnt/backup/src/config" \` | Mounts `./config` from to host as a volume in the container. Change this to a location where you can store Duplicity backup information persistently. The duplicity manifest and sig files are stored to track backup sets/chains. <br /> *Note:* Though these files are backed up to S3/Glacier, they should be stored persistently locally and used. Otherwise, you will need to restore the .sig file from Glacier in order to perform incrementals. |
+| `-v "$PWD/logs:/logfiles" \` | Mounts `./logs` so that Duplicity can write its log files there and persist them. Change to a persistent location. |
+| `docker-duplicity:latest dup \` | The container and the command to execute (`dup` is a helper script used to run duplicity) |
 | `/mnt/backup/src/ \` | The backup source - in this case the mount point |
-| `boto3+s3://bucketname/backup-folder` | The target to write to - in this case an S3 bucket (Note: the `--s3-use-deep-archive` option above will cause the backups to be written to the Glacier Deep Archive tier in S3) |
+| `boto3+s3://bucketname/backup-folder` | The target to write to - in this case an S3 bucket. Note: the `--s3-use-deep-archive` option above will cause the backups to be written to the Glacier Deep Archive tier in S3. |
 
 ### Cleanup backup sets 
-The command below will cleanup backup sets (fulls and incrementals) that are older than the *7* most recent incrementals.
+The command below will cleanup backup sets (fulls and incrementals) that are older than the *7* most recent full backups.
 
-In other words, if full backups are taken once every 4 weeks, this will ensure fulls and incrementals older than `28 * 4 * 7 = 180`days are retained 
+In other words, if full backups are taken once every 4 weeks, this will ensure fulls and incrementals that are less than `28 * 4 * 7 = 180` days old are retained.
 ```bash
 docker run -it --rm --hostname 'backupname' \
 -e OPTIONS="--full-if-older-than 4W --s3-use-deep-archive --no-compression --no-encryption --progress --archive-dir /mnt/backup/src/config --s3-use-multiprocessing --volsize 1024 --verbosity i --log-file /logfiles/log-$(date "+%Y%m%d-%H%M%S").log" \
@@ -99,7 +99,7 @@ boto3+s3://bucketname/backup-folder
 ```
 
 ### List Files in a Backup
-List all files in the latest backup. To list files from a specific point in time, use the `--time TIME` option. See [TIME](http://duplicity.nongnu.org/vers8/duplicity.1.html#sect8) format for more information.
+List all files in the latest backup. To list files from a specific point in time, use the `--time TIME` option. See [TIME](http://duplicity.nongnu.org/vers8/duplicity.1.html#sect8) format for more information on how to specify `TIME`.
 ```bash
 docker run -it --rm --hostname 'backupname' \
 -e OPTIONS="--full-if-older-than 47W --s3-use-deep-archive --no-compression --no-encryption --progress --archive-dir /mnt/backup/src/config --s3-use-multiprocessing --volsize 1024 --verbosity i --log-file /logfiles/log-$(date "+%Y%m%d-%H%M%S").log" \
@@ -115,7 +115,7 @@ boto3+s3://bucketname/backup-folder
 ## Using the container's built-in scheduler
 The container from the Tecnativa repo has a built-in schduler option where the container can run continously and execute Duplcity commands on a schedule. The arguments are similar. 
 
-The following is an example of a `docker-compose` file that will provision container and schedule a daily backup of a source to S3. Similar to the `docker run` commands above, it is configured to create a full backup every 4 weeks and incrementals otherwise. It also cleans up backup sets (fulls and associated incrementals) that are older than the last 7 fulls.
+The following is an example of a `docker-compose` file that will build the container image, launch the container and schedule a daily backup of a source to S3. Similar to the `docker run` commands above, it is configured to create a full backup every 4 weeks and incrementals otherwise. It also cleans up backup sets (fulls and associated incrementals) that are older than the last 7 fulls.
 
 
 ```yaml
@@ -179,6 +179,8 @@ boto3+s3://bucketname/backup-folder
 ```
 
 ## Resources
-Duplicity combines files and diffs into tar archives and (by default) compresses them. As such, it's important to ensure you have enough local storage for tempoary files (generally, at least 2 times the value of `volsize` from experimentation but more is recommended). You should also ensure enough CPU, memory, and networking resources are available to perform backups as quickly as possible. 
+Duplicity combines files and diffs into tar archives and (by default) compresses them. It's important to ensure you have enough local storage for tempoary files (generally, at least 2 times the value of `volsize` from experimentation but more is recommended). You should also ensure enough CPU, memory, and networking resources are available to perform backups as quickly as possible. Perform test benchmarks to ensure the performance will be adequate. 
+
+
 
 
