@@ -51,8 +51,8 @@ docker run -it --rm --hostname 'backupname' \
 -v /tmp/testfiles:/mnt/backup/src/data:ro \
 -v "$PWD/config:/mnt/backup/src/config" \
 -v "$PWD/logs:/logfiles" \
-docker-duplicity:latest-s3 dup \
-/mnt/backup/src/ \
+docker-duplicity:latest dup \
+/mnt/backup/src/data \
 boto3+s3://bucketname/backup-folder
 ```
 Breaking this down:
@@ -64,6 +64,9 @@ Breaking this down:
 | `-v /tmp/testfiles:/mnt/backup/src/data:ro \` | Mounts `/tmp/testfiles` from the host and uses it as the backup source |
 | `-v "$PWD/config:/mnt/backup/src/config" \` | Mounts `./config` from to host as a volume in the container. This is where the duplicity manifest snd sig files are stored to track backup sets/chains. <br /> *Note:* Though these files are backed up to S3/Glacier, they should be stored persistently locally and used. Otherwise, you will need to restore the .sig file from Glacier in order to perform incrementals. |
 | `-v "$PWD/logs:/logfiles" \` | Mounts `./logs` so that Duplicity can write its log files there and persist them. |
+| `docker-duplicity:latest dup \` | The container and the command to execute (`dup`) |
+| `/mnt/backup/src/ \` | The backup source - in this case the mount point |
+| `boto3+s3://bucketname/backup-folder` | The target to write to - in this case an S3 bucket (Note: the `--s3-use-deep-archive` option above will cause the backups to be written to the Glacier Deep Archive tier in S3) |
 
 ### Cleanup backup sets 
 The command below will cleanup backup sets (fulls and incrementals) that are older than the *7* most recent incrementals.
@@ -76,7 +79,7 @@ docker run -it --rm --hostname 'backupname' \
 -v /tmp/testfiles:/mnt/backup/src/data:ro \
 -v "$PWD/config:/mnt/backup/src/config" \
 -v "$PWD/logs:/logfiles" \
-docker-duplicity:latest-s3 dup \
+docker-duplicity:latest dup \
 remove-all-but-n-full 7 \
 boto3+s3://bucketname/backup-folder
 ```
@@ -90,7 +93,7 @@ docker run -it --rm --hostname 'backupname' \
 -v /tmp/testfiles:/mnt/backup/src/data:ro \
 -v "$PWD/config:/mnt/backup/src/config" \
 -v "$PWD/logs:/logfiles" \
-docker-duplicity:latest-s3 dup \
+docker-duplicity:latest dup \
 collection-status \
 boto3+s3://bucketname/backup-folder
 ```
@@ -104,7 +107,7 @@ docker run -it --rm --hostname 'backupname' \
 -v /tmp/testfiles:/mnt/backup/src/data:ro \
 -v "$PWD/config:/mnt/backup/src/config" \
 -v "$PWD/logs:/logfiles" \
-docker-duplicity:latest-s3 dup \
+docker-duplicity:latest dup \
 list-current-files \
 boto3+s3://bucketname/backup-folder
 ```
